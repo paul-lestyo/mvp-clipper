@@ -3,6 +3,7 @@ package handlers
 import (
 	"fmt"
 	"mvp-clipper/internal/services/ai"
+	"mvp-clipper/internal/services/face"
 	"mvp-clipper/internal/services/ffmpeg"
 	"mvp-clipper/internal/services/yt"
 	"mvp-clipper/internal/utils"
@@ -60,12 +61,13 @@ func analyzeClip(c *fiber.Ctx) error {
 
 func generateClip(c *fiber.Ctx) error {
 	var payload struct {
-		URL      string `json:"url"`
-		Start    string `json:"start"`
-		End      string `json:"end"`
-		Portrait bool   `json:"portrait"`
-		Caption  bool   `json:"caption"`
-		Split    bool   `json:"split"`
+		URL       string `json:"url"`
+		Start     string `json:"start"`
+		End       string `json:"end"`
+		Portrait  bool   `json:"portrait"`
+		Caption   bool   `json:"caption"`
+		Split     bool   `json:"split"`
+		SmartCrop bool   `json:"smartCrop"`
 	}
 
 	if err := c.BodyParser(&payload); err != nil {
@@ -98,17 +100,34 @@ func generateClip(c *fiber.Ctx) error {
 		return errJson(c, err)
 	}
 
-	// 3. Portrait
+	// 3. Smart Crop (if enabled)
 	finalPath := cutPath
-	if payload.Portrait {
+	if payload.SmartCrop {
+		// Analyze video for face positions
+		timeline, err := face.AnalyzeVideo(cutPath)
+		if err != nil {
+			return errJson(c, err)
+		}
+
+		// Compress timeline to remove redundant entries
+		compressed := face.CompressTimeline(timeline)
+		fmt.Println(compressed)
+		// Apply dynamic cropping
+		smartPath := fmt.Sprintf("tmp/clips/%s_smart.mp4", videoID)
+		if err := ffmpeg.DynamicCrop(cutPath, smartPath, compressed); err != nil {
+			return errJson(c, err)
+		}
+		finalPath = smartPath
+	} else if payload.Portrait {
+		// 4. Portrait (manual mode)
 		finalPath = fmt.Sprintf("tmp/clips/%s_portrait.mp4", videoID)
 		if err := ffmpeg.ToPortrait(cutPath, finalPath); err != nil {
 			return errJson(c, err)
 		}
 	}
 
-	// 4. Split (2-speaker)
-	if payload.Split {
+	// 5. Split (2-speaker) - only if not using smart crop
+	if payload.Split && !payload.SmartCrop {
 		splitPath := fmt.Sprintf("tmp/clips/%s_split.mp4", videoID)
 		if err := ffmpeg.SplitTwoSpeakers(finalPath, splitPath); err != nil {
 			return errJson(c, err)
@@ -121,15 +140,19 @@ func generateClip(c *fiber.Ctx) error {
 		// Find the SRT file for this video
 		srtPath, err := findSubtitleFile(videoID)
 		if err != nil {
-			return errJson(c, err)
+			// Subtitle not found, try to download it
+			srtPath, err = yt.DownloadTranscript(payload.URL)
+			if err != nil {
+				return errJson(c, fmt.Errorf("failed to download subtitle: %w", err))
+			}
 		}
-		
+
 		// Cut SRT to match clip duration (adjust timestamps)
 		cutSrtPath := fmt.Sprintf("tmp/clips/%s_cut.srt", videoID)
 		if err := utils.CutSRT(srtPath, cutSrtPath, payload.Start, payload.End); err != nil {
 			return errJson(c, err)
 		}
-		
+
 		captionPath := fmt.Sprintf("tmp/clips/%s_caption.mp4", videoID)
 		if err := ffmpeg.BurnCaption(finalPath, cutSrtPath, captionPath); err != nil {
 			return errJson(c, err)

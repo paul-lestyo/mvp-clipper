@@ -1,0 +1,50 @@
+# Exclude temporary files and build artifacts
+tmp/
+output/
+*.log
+
+# Exclude video files (not needed in build)
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+
+# Exclude image files from tmp processing
+*.jpg
+*.jpeg
+*.png
+*.gif
+
+# Exclude subtitle files
+*.srt
+*.vtt
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go build artifacts (if any)
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test files
+*_test.go
+
+# Documentation (not needed in build)
+*.md
+!README.md
+
+# Environment files
+.env.local
+.env.*.local
