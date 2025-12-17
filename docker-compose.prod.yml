@@ -1,0 +1,59 @@
+version: "3.8"
+
+# Production Docker Compose Configuration
+# This file is optimized for production deployments with stricter resource limits
+# and security hardening.
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mvp-clipper-app-prod
+    ports:
+      - "8080:8080"
+    # Production: No code volume mounts (immutable containers)
+    volumes:
+      - ./tmp:/app/tmp:delegated
+      - ./models:/app/models:ro  # Read-only model mount
+    env_file:
+      - .env.production
+    environment:
+      # Performance tuning for Go
+      - GOMEMLIMIT=3600MiB
+      - GOGC=100
+    restart: always  # Always restart in production
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'          # More resources for production
+          memory: 4G
+        reservations:
+          cpus: '1.0'
+          memory: 1G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"        # Larger logs for production
+        max-file: "5"
+        compress: "true"       # Compress rotated logs
+    networks:
+      - clipper-network
+    # Security hardening
+    security_opt:
+      - no-new-privileges:true
+    # Read-only root filesystem (commented out as /app/tmp needs write access)
+    # read_only: true
+    # tmpfs:
+    #   - /tmp
+    #   - /app/tmp
+
+networks:
+  clipper-network:
+    driver: bridge

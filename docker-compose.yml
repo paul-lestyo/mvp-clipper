@@ -1,11 +1,44 @@
-version: "3"
+version: "3.8"
 
 services:
   app:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mvp-clipper-app
     ports:
       - "8080:8080"
     volumes:
-      - ./tmp:/app/tmp
+      - ./tmp:/app/tmp:delegated
     env_file:
       - .env
+    environment:
+      # Performance tuning for Go
+      - GOMEMLIMIT=1800MiB
+      - GOGC=100
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - clipper-network
+
+networks:
+  clipper-network:
+    driver: bridge

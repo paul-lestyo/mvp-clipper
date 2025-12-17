@@ -85,19 +85,17 @@ func DetectMode(framePath string) (string, error) {
 	frameWidth := float32(img.Bounds().Dx())
 	midpoint := frameWidth / 2
 
-	// Face coordinates from YuNet are in 640x640 space, need to scale to frame size
-	scale := frameWidth / float32(inputWidth)
-
-	log.Printf("[DEBUG] Frame width: %.0f, midpoint: %.0f, scale: %.2f", frameWidth, midpoint, scale)
+	// Pigo returns coordinates in actual image space (no scaling needed)
+	log.Printf("[DEBUG] Frame width: %.0f, midpoint: %.0f", frameWidth, midpoint)
 
 	leftFaces := 0
 	rightFaces := 0
 
 	for i, face := range faces {
-		// Scale face coordinates to actual frame size
-		centerX := (face.X + face.Width/2) * scale
-		log.Printf("[DEBUG] Face %d: X=%.1f (scaled=%.1f), centerX=%.1f, side=%s", 
-			i, face.X, face.X*scale, centerX, 
+		// Calculate face center X position
+		centerX := face.X + face.Width/2
+		log.Printf("[DEBUG] Face %d: X=%.1f, centerX=%.1f, side=%s",
+			i, face.X, centerX,
 			map[bool]string{true: "left", false: "right"}[centerX < midpoint])
 		if centerX < midpoint {
 			leftFaces++

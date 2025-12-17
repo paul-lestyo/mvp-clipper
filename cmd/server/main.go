@@ -10,14 +10,13 @@ import (
 func main() {
 	cfg := config.Load()
 
-	// Initialize YuNet face detection model
-	// Note: Run setup_smart_crop.ps1 first to download model and ONNX Runtime
-	err := face.InitYuNet("models/face_detection_yunet_2023mar.onnx")
+	// Initialize Pigo face detection model (pure Go, no CGO required)
+	err := face.InitPigo("models/facefinder")
 	if err != nil {
-		log.Printf("Warning: Failed to initialize YuNet (smart crop disabled): %v", err)
+		log.Printf("Warning: Failed to initialize Pigo (smart crop disabled): %v", err)
 	} else {
 		defer face.Cleanup()
-		log.Println("YuNet face detection initialized")
+		log.Println("Pigo face detection initialized")
 	}
 
 	server := api.NewServer(cfg)

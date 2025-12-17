@@ -1,83 +1,81 @@
+# syntax=docker/dockerfile:1.4
 # ============================================
-# Builder Stage - Build Go binary and download dependencies
+# Builder Stage - Build Go binary
 # ============================================
-FROM golang:1.22-bullseye AS builder
+FROM golang:1.22-alpine AS builder
 
 WORKDIR /app
 
-# Install build dependencies
-RUN apt-get update && apt-get install -y \
-    wget \
-    tar \
-    && rm -rf /var/lib/apt/lists/*
+# Install minimal build dependencies
+RUN apk add --no-cache \
+    git \
+    ca-certificates \
+    wget
 
-# Download ONNX Runtime for Linux (glibc)
-RUN wget https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-linux-x64-1.22.0.tgz \
-    && tar -xzf onnxruntime-linux-x64-1.22.0.tgz \
-    && mv onnxruntime-linux-x64-1.22.0/lib/libonnxruntime.so.1.22.0 /usr/local/lib/ \
-    && rm -rf onnxruntime-linux-x64-1.22.0.tgz onnxruntime-linux-x64-1.22.0
+# Download Pigo cascade file (facefinder)
+RUN mkdir -p models && \
+    wget -q -O models/facefinder \
+    https://github.com/esimov/pigo/raw/master/cascade/facefinder
 
-# Download YuNet face detection model
-RUN mkdir -p models \
-    && wget -O models/face_detection_yunet_2023mar.onnx \
-    https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx
-
-# Copy go mod files first for better layer caching
+# Copy go mod files
 COPY go.mod go.sum ./
-RUN go mod download
+
+# Download dependencies with cache mount
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go mod download
 
 # Copy source code
 COPY . .
 
-# Build the Go binary with CGO enabled (required for ONNX Runtime)
-RUN CGO_ENABLED=1 GOOS=linux go build \
+# Build binary (pure Go, no CGO needed)
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build \
+    -trimpath \
     -ldflags='-w -s' \
     -o server ./cmd/server
 
 # ============================================
-# Final Stage - Debian Slim for glibc compatibility with ONNX Runtime
+# Final Stage - Alpine for minimal size
 # ============================================
-FROM debian:12-slim
+FROM alpine:3.19
 
 WORKDIR /app
 
-# Install runtime dependencies only
-RUN apt-get update && apt-get install -y \
-    # Video processing
+# Install runtime dependencies
+RUN apk add --no-cache \
     ffmpeg \
-    # Python for yt-dlp
     python3 \
-    python3-pip \
-    # Font support
-    fonts-liberation \
+    py3-pip \
+    font-liberation \
     fontconfig \
-    # Required for ONNX Runtime
-    libgomp1 \
+    curl \
     && pip3 install --no-cache-dir --break-system-packages yt-dlp \
     && fc-cache -f -v \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+    && apk del py3-pip \
+    && rm -rf /var/cache/apk/* /tmp/* /root/.cache
 
-# Copy ONNX Runtime library from builder
-COPY --from=builder /usr/local/lib/libonnxruntime.so.1.22.0 /usr/local/lib/
-RUN ln -s /usr/local/lib/libonnxruntime.so.1.22.0 /usr/local/lib/libonnxruntime.so \
-    && ldconfig /usr/local/lib || true
-
-# Copy YuNet model from builder
+# Copy Pigo cascade from builder
 COPY --from=builder /app/models /app/models
 
-# Copy built binary from builder
+# Copy built binary
 COPY --from=builder /app/server /app/server
 
-# Create tmp directory for temporary files
+# Create tmp directory
 RUN mkdir -p /app/tmp
 
-# Set environment variables for library paths
-ENV LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+# Performance environment variables (Go only, no OpenCV)
+ENV GOMEMLIMIT=1800MiB \
+    GOGC=100
 
-# Expose port (adjust if needed)
+# Expose port
 EXPOSE 8080
 
-# Run the server
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+# Run server
 CMD ["./server"]
 

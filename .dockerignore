@@ -15,6 +15,10 @@ output/
 *.jpeg
 *.png
 *.gif
+*.webp
+
+# Exclude models (downloaded in Dockerfile)
+models/
 
 # Exclude subtitle files
 *.srt

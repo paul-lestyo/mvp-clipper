@@ -3,6 +3,7 @@ module mvp-clipper
 go 1.19
 
 require (
+	github.com/esimov/pigo v1.4.6
 	github.com/gofiber/fiber/v2 v2.52.10
 	github.com/sashabaranov/go-openai v1.41.2
 )
@@ -18,6 +19,5 @@ require (
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasthttp v1.51.0 // indirect
 	github.com/valyala/tcplisten v1.0.0 // indirect
-	github.com/yalue/onnxruntime_go v1.13.0 // indirect
 	golang.org/x/sys v0.28.0 // indirect
 )
