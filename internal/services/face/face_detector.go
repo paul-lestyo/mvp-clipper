@@ -2,166 +2,135 @@ package face
 
 import (
 	"fmt"
-	"image"
-	_ "image/jpeg"
 	"log"
 	"mvp-clipper/internal/utils"
-	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
 
-// ExtractFrames extracts frames from a video at the specified fps
-func ExtractFrames(videoPath string, fps int) ([]string, error) {
-	// Create temp directory for frames
-	framesDir := filepath.Join("tmp", "frames", filepath.Base(videoPath))
-	err := os.MkdirAll(framesDir, os.ModePerm)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create frames directory: %w", err)
-	}
-
-	// FFmpeg command to extract frames
-	outputPattern := filepath.Join(framesDir, "frame_%04d.jpg")
+// GetVideoMetadata returns width, height, and fps of the video
+func GetVideoMetadata(videoPath string) (int, int, float64, error) {
 	cmd := []string{
-		"ffmpeg",
-		"-i", videoPath,
-		"-vf", fmt.Sprintf("fps=%d", fps),
-		"-q:v", "2", // JPEG quality
-		outputPattern,
+		"ffprobe",
+		"-v", "error",
+		"-select_streams", "v:0",
+		"-show_entries", "stream=width,height,r_frame_rate",
+		"-of", "csv=s=x:p=0",
+		videoPath,
 	}
 
-	_, err = utils.Exec(cmd...)
+	output, err := utils.Exec(cmd...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to extract frames: %w", err)
+		return 0, 0, 0, fmt.Errorf("ffprobe failed: %w", err)
 	}
 
-	// Get list of extracted frames
-	files, err := filepath.Glob(filepath.Join(framesDir, "frame_*.jpg"))
+	// Output format: widthxheightxfps_num/fps_den
+	// e.g., 1920x1080x30/1
+	var width, height, num, den int
+	output = strings.TrimSpace(output)
+	lines := strings.Split(output, "\n")
+	if len(lines) > 0 {
+		output = lines[0]
+	}
+
+	_, err = fmt.Sscanf(output, "%dx%dx%d/%d", &width, &height, &num, &den)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list frames: %w", err)
+		return 0, 0, 0, fmt.Errorf("failed to parse ffprobe output '%s': %w", output, err)
 	}
 
-	return files, nil
+	if den == 0 {
+		return 0, 0, 0, fmt.Errorf("invalid fps denominator 0")
+	}
+
+	fps := float64(num) / float64(den)
+	return width, height, fps, nil
 }
 
-// DetectMode analyzes a frame and determines the cropping mode
-func DetectMode(framePath string) (string, error) {
-	faces, err := DetectFaces(framePath)
-	if err != nil {
-		log.Printf("[DEBUG] Face detection failed for %s: %v", framePath, err)
-		return "", fmt.Errorf("failed to detect faces: %w", err)
-	}
-
-	log.Printf("[DEBUG] Detected %d faces in %s", len(faces), framePath)
-
-	// Safety check: if we detect an unreasonable number of faces, it's likely false positives
-	const maxFacesPerFrame = 20
-	if len(faces) > maxFacesPerFrame {
-		log.Printf("[WARNING] Detected %d faces (> %d), likely false positives. Using center mode.", len(faces), maxFacesPerFrame)
-		return "center", nil
-	}
-
-	// Determine mode based on number and position of faces
-	if len(faces) <= 1 {
-		log.Printf("[DEBUG] Using center mode (faces <= 1)")
-		return "center", nil
-	}
-
-	// Get actual frame dimensions to calculate midpoint
-	file, err := os.Open(framePath)
-	if err != nil {
-		log.Printf("[DEBUG] Failed to open frame for dimension check: %v", err)
-		return "center", nil // Default to center on error
-	}
-	defer file.Close()
-
-	img, _, err := image.Decode(file)
-	if err != nil {
-		log.Printf("[DEBUG] Failed to decode frame: %v", err)
-		return "center", nil // Default to center on error
-	}
-
-	// Calculate midpoint based on actual frame width
-	frameWidth := float32(img.Bounds().Dx())
-	midpoint := frameWidth / 2
-
-	// Pigo returns coordinates in actual image space (no scaling needed)
-	log.Printf("[DEBUG] Frame width: %.0f, midpoint: %.0f", frameWidth, midpoint)
-
-	leftFaces := 0
-	rightFaces := 0
-
-	for i, face := range faces {
-		// Calculate face center X position
-		centerX := face.X + face.Width/2
-		log.Printf("[DEBUG] Face %d: X=%.1f, centerX=%.1f, side=%s",
-			i, face.X, centerX,
-			map[bool]string{true: "left", false: "right"}[centerX < midpoint])
-		if centerX < midpoint {
-			leftFaces++
-		} else {
-			rightFaces++
-		}
-	}
-
-	log.Printf("[DEBUG] Left faces: %d, Right faces: %d", leftFaces, rightFaces)
-
-	// If we have faces on both sides, use split mode
-	if leftFaces > 0 && rightFaces > 0 {
-		log.Printf("[DEBUG] Using SPLIT mode (faces on both sides)")
-		return "split", nil
-	}
-
-	// Otherwise, use center mode
-	log.Printf("[DEBUG] Using center mode (faces on same side)")
-	return "center", nil
-}
-
-// AnalyzeVideo extracts frames and analyzes face positions to create a timeline
+// AnalyzeVideo analyzes face positions using the Python service
 func AnalyzeVideo(videoPath string) ([]TimelineEntry, error) {
-	const fps = 1 // Extract 1 frame per second (1 fps)
-
-	// Extract frames
-	frames, err := ExtractFrames(videoPath, fps)
+	// 1. Get Video Metadata
+	width, height, fps, err := GetVideoMetadata(videoPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to extract frames: %w", err)
+		return nil, fmt.Errorf("failed to get video metadata: %w", err)
 	}
-	defer cleanupFrames(frames)
 
+	log.Printf("[INFO] Video Metadata: %dx%d @ %.2f fps", width, height, fps)
+
+	// 2. Call Python Service
+	client := NewPythonClient()
+	filename := filepath.Base(videoPath)
+	
+	log.Printf("[INFO] Requesting analysis for %s", filename)
+	results, err := client.ProcessVideo(filename)
+	if err != nil {
+		return nil, fmt.Errorf("python analysis failed: %w", err)
+	}
+
+	if len(results) == 0 {
+		log.Printf("[WARNING] No analysis results returned")
+		return nil, nil
+	}
+
+	log.Printf("[DEBUG] Python service returned %d samples.", len(results))
+	if len(results) > 0 {
+		log.Printf("[DEBUG] Sample[0]: %+v", results[0])
+	}
+
+	// 3. Convert to Timeline
 	var timeline []TimelineEntry
-
-	// Analyze each frame
-	log.Printf("[DEBUG] Analyzing %d frames at %d fps", len(frames), fps)
-	for i, framePath := range frames {
-		timestamp := float64(i) / float64(fps)
-		log.Printf("[DEBUG] Frame %d at %.1fs: %s", i, timestamp, framePath)
+	for i, res := range results {
+		timestamp := float64(res.Frame) / fps
 		
-		mode, err := DetectMode(framePath)
-		if err != nil {
-			// If detection fails, default to center mode
-			log.Printf("[DEBUG] Detection failed, using center mode")
+		var centers []Point
+		for _, cx := range res.Centers {
+			centers = append(centers, Point{
+				X: float32(cx),
+				Y: float32(height / 2),
+			})
+		}
+		
+		var primaryCenter *Point
+		if len(centers) > 0 {
+			primaryCenter = &centers[0]
+		}
+		
+		mode := res.Mode
+		if mode == "" {
 			mode = "center"
 		}
 
-		timeline = append(timeline, TimelineEntry{
-			Timestamp: timestamp,
-			Mode:      mode,
-		})
-		log.Printf("[DEBUG] Timeline entry: {%.1fs, %s}", timestamp, mode)
+		// Mock BBox for compatibility
+		var bbox *BoundingBox
+		if primaryCenter != nil {
+			boxSize := float32(200)
+			bbox = &BoundingBox{
+				X:      primaryCenter.X - boxSize/2,
+				Y:      primaryCenter.Y - boxSize/2,
+				Width:  boxSize,
+				Height: boxSize,
+			}
+		}
+
+		entry := TimelineEntry{
+			Timestamp:  timestamp,
+			Mode:       mode,
+			BBox:       bbox,
+			Center:     primaryCenter,
+			Centers:    centers,
+			Confidence: 1.0,
+			Status:     StatusDetected,
+		}
+		timeline = append(timeline, entry)
+
+		// Log occasional samples
+		if i < 3 || i%50 == 0 || i == len(results)-1 {
+			log.Printf("[TRACE] Timeline Entry #%d: T=%.2fs Mode=%s Centers=%v", i, timestamp, mode, centers)
+		}
 	}
 
+	log.Printf("[INFO] Generated timeline with %d entries", len(timeline))
 	return timeline, nil
-}
-
-// cleanupFrames removes extracted frame files
-func cleanupFrames(frames []string) {
-	if len(frames) == 0 {
-		return
-	}
-
-	// Remove the frames directory
-	framesDir := filepath.Dir(frames[0])
-	os.RemoveAll(framesDir)
 }
 
 // GetVideoDuration returns the duration of a video in seconds
@@ -179,7 +148,7 @@ func GetVideoDuration(videoPath string) (float64, error) {
 		return 0, fmt.Errorf("failed to get video duration: %w", err)
 	}
 
-	duration, err := strconv.ParseFloat(output[:len(output)-1], 64)
+	duration, err := strconv.ParseFloat(strings.TrimSpace(output), 64)
 	if err != nil {
 		return 0, fmt.Errorf("failed to parse duration: %w", err)
 	}

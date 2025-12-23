@@ -8,6 +8,7 @@ import (
 	"mvp-clipper/internal/services/yt"
 	"mvp-clipper/internal/utils"
 	"os"
+	"path/filepath"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -80,22 +81,29 @@ func generateClip(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"error": "invalid YouTube URL"})
 	}
 
+	// Get storage path
+	storagePath := os.Getenv("VIDEO_STORAGE_PATH")
+	if storagePath == "" {
+		storagePath = "tmp/downloads"
+	}
+
 	// Ensure directories exist
-	os.MkdirAll("tmp/clips", os.ModePerm)
-	os.MkdirAll("tmp/downloads", os.ModePerm)
+	os.MkdirAll(storagePath, os.ModePerm)
+	os.MkdirAll("tmp/clips", os.ModePerm) // Keep tmp/clips for legacy or strict outputs if needed, but we try to use storagePath for intermediate files
 
 	// 1. Download video (skip if already exists)
-	videoPath := fmt.Sprintf("tmp/downloads/%s.mp4", videoID)
+	videoPath := filepath.Join(storagePath, fmt.Sprintf("%s.mp4", videoID))
 	if _, err := os.Stat(videoPath); os.IsNotExist(err) {
 		// File doesn't exist, download it
-		videoPath, err = yt.DownloadVideo(payload.URL)
+		videoPath, err = yt.DownloadVideo(payload.URL, storagePath)
 		if err != nil {
 			return errJson(c, err)
 		}
 	}
 
 	// 2. Cut
-	cutPath := fmt.Sprintf("tmp/clips/%s_cut.mp4", videoID)
+	// We save the cut file to storagePath so Python can see it
+	cutPath := filepath.Join(storagePath, fmt.Sprintf("%s_cut.mp4", videoID))
 	if err := ffmpeg.Cut(videoPath, cutPath, payload.Start, payload.End); err != nil {
 		return errJson(c, err)
 	}
@@ -104,15 +112,19 @@ func generateClip(c *fiber.Ctx) error {
 	finalPath := cutPath
 	if payload.SmartCrop {
 		// Analyze video for face positions
+		// cutPath is in storagePath, which is mapped to /app/shared in Python
 		timeline, err := face.AnalyzeVideo(cutPath)
 		if err != nil {
 			return errJson(c, err)
 		}
 
 		// Compress timeline to remove redundant entries
+		// Note: CompressTimeline implementation might need to be checked if it handles the new "center" mode entries correctly.
 		compressed := face.CompressTimeline(timeline)
-		fmt.Println(compressed)
+		
 		// Apply dynamic cropping
+		// Output to tmp/clips because this is the final result to return to user? 
+		// Or keep on storagePath? Let's use tmp/clips for final output to avoid cluttering shared volume.
 		smartPath := fmt.Sprintf("tmp/clips/%s_smart.mp4", videoID)
 		if err := ffmpeg.DynamicCrop(cutPath, smartPath, compressed); err != nil {
 			return errJson(c, err)
@@ -135,12 +147,14 @@ func generateClip(c *fiber.Ctx) error {
 		finalPath = splitPath
 	}
 
-	// 5. Burn Caption
+	// 6. Burn Caption
 	if payload.Caption {
 		// Find the SRT file for this video
-		srtPath, err := findSubtitleFile(videoID)
+		srtPath, err := findSubtitleFile(videoID, storagePath)
 		if err != nil {
-			// Subtitle not found, try to download it
+			// Subtitle not found, try to download it (to storagePath?)
+			// yt.DownloadTranscript currently returns a path, usually in tmp/transcripts or similiar.
+			// We should probably check where it downloads.
 			srtPath, err = yt.DownloadTranscript(payload.URL)
 			if err != nil {
 				return errJson(c, fmt.Errorf("failed to download subtitle: %w", err))
@@ -166,11 +180,16 @@ func generateClip(c *fiber.Ctx) error {
 }
 
 // findSubtitleFile finds the subtitle file for a given video ID
-func findSubtitleFile(videoID string) (string, error) {
+func findSubtitleFile(videoID, dir string) (string, error) {
 	// Try common subtitle extensions
 	extensions := []string{".id.srt", ".id.vtt", ".en.srt", ".en.vtt", ".srt", ".vtt"}
 	for _, ext := range extensions {
-		path := fmt.Sprintf("tmp/downloads/%s%s", videoID, ext)
+		path := filepath.Join(dir, videoID+ext)
+		if _, err := os.Stat(path); err == nil {
+			return path, nil
+		}
+		// Also check tmp/downloads just in case
+		path = filepath.Join("tmp/downloads", videoID+ext)
 		if _, err := os.Stat(path); err == nil {
 			return path, nil
 		}

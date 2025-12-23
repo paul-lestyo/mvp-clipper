@@ -9,18 +9,24 @@ import (
 	"strings"
 )
 
-func DownloadVideo(url string) (string, error) {
+func DownloadVideo(url, outputDir string) (string, error) {
 	// Extract video ID
 	videoID := ExtractVideoID(url)
 	if videoID == "" {
 		return "", fmt.Errorf("invalid YouTube URL: cannot extract video ID")
 	}
 
+	if outputDir == "" {
+		outputDir = "tmp/downloads"
+	}
+
 	// Ensure directory exists
-	utils.EnsureDir("tmp/downloads")
+	if err := os.MkdirAll(outputDir, os.ModePerm); err != nil {
+		return "", fmt.Errorf("failed to create directory %s: %w", outputDir, err)
+	}
 
 	// Output path with video ID
-	output := fmt.Sprintf("tmp/downloads/%s.mp4", videoID)
+	output := filepath.Join(outputDir, fmt.Sprintf("%s.mp4", videoID))
 
 	// Download best video+audio and merge to mp4
 	cmd := []string{
@@ -43,7 +49,7 @@ func DownloadVideo(url string) (string, error) {
 	}
 
 	// Try to find the downloaded file
-	matches, _ := filepath.Glob(fmt.Sprintf("tmp/downloads/%s.*", videoID))
+	matches, _ := filepath.Glob(filepath.Join(outputDir, fmt.Sprintf("%s.*", videoID)))
 	for _, m := range matches {
 		ext := strings.ToLower(filepath.Ext(m))
 		if ext == ".mp4" || ext == ".webm" || ext == ".mkv" {

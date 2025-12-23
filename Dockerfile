@@ -9,13 +9,7 @@ WORKDIR /app
 # Install minimal build dependencies
 RUN apk add --no-cache \
     git \
-    ca-certificates \
-    wget
-
-# Download Pigo cascade file (facefinder)
-RUN mkdir -p models && \
-    wget -q -O models/facefinder \
-    https://github.com/esimov/pigo/raw/master/cascade/facefinder
+    ca-certificates
 
 # Copy go mod files
 COPY go.mod go.sum ./
@@ -56,16 +50,13 @@ RUN apk add --no-cache \
     && apk del py3-pip \
     && rm -rf /var/cache/apk/* /tmp/* /root/.cache
 
-# Copy Pigo cascade from builder
-COPY --from=builder /app/models /app/models
-
 # Copy built binary
 COPY --from=builder /app/server /app/server
 
 # Create tmp directory
 RUN mkdir -p /app/tmp
 
-# Performance environment variables (Go only, no OpenCV)
+# Performance environment variables
 ENV GOMEMLIMIT=1800MiB \
     GOGC=100
 

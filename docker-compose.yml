@@ -1,41 +1,38 @@
-version: "3.8"
+version: '3.8'
 
 services:
-  app:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: mvp-clipper-app
+  # Service Golang (Downloader & Orchestrator)
+  go-app:
+    build: .
+    container_name: mvp-clipper-go
     ports:
       - "8080:8080"
     volumes:
-      - ./tmp:/app/tmp:delegated
-    env_file:
-      - .env
+      # Mapping folder host "./temp_videos" ke dalam container di "/app/shared"
+      - ./temp_videos:/app/shared
+      # Keep local tmp just in case, or for logs
+      - ./tmp:/app/tmp
     environment:
-      # Performance tuning for Go
-      - GOMEMLIMIT=1800MiB
-      - GOGC=100
+      - VIDEO_STORAGE_PATH=/app/shared
+      - PYTHON_SERVICE_URL=http://python-app:5000
+    depends_on:
+      - python-app
     restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: '2.0'
-          memory: 2G
-        reservations:
-          cpus: '0.5'
-          memory: 512M
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+    networks:
+      - clipper-network
+
+  # Service Python (Face Recognition Worker)
+  python-app:
+    build: ./python-app
+    container_name: mvp-clipper-python
+    ports:
+      - "5000:5000"
+    volumes:
+      # PENTING: Mapping ke folder yang SAMA di dalam container
+      - ./temp_videos:/app/shared
+    environment:
+      - VIDEO_STORAGE_PATH=/app/shared
+    restart: unless-stopped
     networks:
       - clipper-network
 

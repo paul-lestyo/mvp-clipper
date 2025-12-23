@@ -32,3 +32,4 @@ go.work.sum
 # .vscode/
 /tmp/
 .idea/
+/temp_videos

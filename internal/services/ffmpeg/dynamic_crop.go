@@ -3,6 +3,7 @@ package ffmpeg
 import (
 	"fmt"
 	"log"
+	"math"
 	"mvp-clipper/internal/services/face"
 	"mvp-clipper/internal/utils"
 	"os"
@@ -16,6 +17,12 @@ func DynamicCrop(input, output string, timeline []face.TimelineEntry) error {
 		return fmt.Errorf("timeline is empty")
 	}
 
+	// Get video metadata to handle scaling and cropping correctly
+	width, height, _, err := face.GetVideoMetadata(input)
+	if err != nil {
+		return fmt.Errorf("failed to get video metadata: %w", err)
+	}
+
 	// Get video duration to handle the last segment
 	duration, err := face.GetVideoDuration(input)
 	if err != nil {
@@ -23,24 +30,21 @@ func DynamicCrop(input, output string, timeline []face.TimelineEntry) error {
 	}
 
 	// Build FFmpeg filter complex
-	filterComplex := buildDynamicCropFilter(timeline, duration)
+	filterComplex := buildDynamicCropFilter(timeline, duration, width, height)
 	
 	log.Printf("[DEBUG] Filter complex (%d chars)", len(filterComplex))
 	
-	// Write filter to temp file to avoid command line length limits
+	// Write filter to temp file
 	filterFile := "tmp/filter_complex.txt"
 	err = os.WriteFile(filterFile, []byte(filterComplex), 0644)
 	if err != nil {
 		return fmt.Errorf("failed to write filter file: %w", err)
 	}
 	
-	// Get absolute path for filter file
 	absFilterFile, err := filepath.Abs(filterFile)
 	if err != nil {
 		return fmt.Errorf("failed to get absolute path: %w", err)
 	}
-	
-	log.Printf("[DEBUG] Filter file: %s", absFilterFile)
 	
 	cmd := []string{
 		"ffmpeg",
@@ -58,7 +62,6 @@ func DynamicCrop(input, output string, timeline []face.TimelineEntry) error {
 	ffmpegOutput, err := utils.Exec(cmd...)
 	if err != nil {
 		log.Printf("[ERROR] FFmpeg failed. Output: %s", ffmpegOutput)
-		log.Printf("[ERROR] Command: %v", cmd)
 		return fmt.Errorf("dynamic crop failed: %w", err)
 	}
 
@@ -66,89 +69,174 @@ func DynamicCrop(input, output string, timeline []face.TimelineEntry) error {
 }
 
 // buildDynamicCropFilter creates FFmpeg filter for dynamic cropping
-func buildDynamicCropFilter(timeline []face.TimelineEntry, videoDuration float64) string {
+func buildDynamicCropFilter(timeline []face.TimelineEntry, videoDuration float64, origW, origH int) string {
 	var filters []string
 	var outputs []string
 
-	// Split input video into N streams (one for each timeline segment)
-	numSegments := len(timeline)
+	// Calculate scaled dimensions (we scale height to 1920)
+	scaledH := 1920
+	ratio := float64(scaledH) / float64(origH)
+	scaledW := int(float64(origW) * ratio)
+
+	// 1. Group timeline into segments of same Mode
+	type Segment struct {
+		Mode    string
+		Start   float64
+		End     float64
+		Entries []face.TimelineEntry
+	}
+
+	var segments []Segment
+	if len(timeline) > 0 {
+		currentSeg := Segment{
+			Mode:    timeline[0].Mode,
+			Start:   timeline[0].Timestamp,
+			Entries: []face.TimelineEntry{timeline[0]},
+		}
+
+		for i := 1; i < len(timeline); i++ {
+			entry := timeline[i]
+			// Limit entries per segment to prevent extremely long FFmpeg expressions
+			if entry.Mode == currentSeg.Mode && len(currentSeg.Entries) < 40 {
+				currentSeg.Entries = append(currentSeg.Entries, entry)
+			} else {
+				currentSeg.End = entry.Timestamp
+				segments = append(segments, currentSeg)
+				currentSeg = Segment{
+					Mode:    entry.Mode,
+					Start:   entry.Timestamp,
+					Entries: []face.TimelineEntry{entry},
+				}
+			}
+		}
+		currentSeg.End = videoDuration
+		segments = append(segments, currentSeg)
+	}
+
+	// 2. Build Filter Graph
+	numSegments := len(segments)
 	splitOutputs := make([]string, numSegments)
 	for i := 0; i < numSegments; i++ {
 		splitOutputs[i] = fmt.Sprintf("[v%d]", i)
 	}
-	filters = append(filters, fmt.Sprintf("[0:v]split=%d%s", numSegments, strings.Join(splitOutputs, "")))
+	
+	if numSegments > 1 {
+		filters = append(filters, fmt.Sprintf("[0:v]split=%d%s", numSegments, strings.Join(splitOutputs, "")))
+	} else {
+		filters = append(filters, fmt.Sprintf("[0:v]copy[v0]"))
+	}
 
-	// Process each timeline segment
-	for i, entry := range timeline {
-		startTime := entry.Timestamp
-		var endTime float64
-		if i < len(timeline)-1 {
-			endTime = timeline[i+1].Timestamp
-		} else {
-			endTime = videoDuration
+	// Helper to generate X expression
+	generateXExpr := func(seg Segment, width int, centerIdx int) string {
+		defaultX := float64(width-1080) / 2.0
+		var parts []string
+		
+		if len(seg.Entries) == 1 {
+			targetX := defaultX
+			if len(seg.Entries[0].Centers) > centerIdx {
+				cx := float64(seg.Entries[0].Centers[centerIdx].X) * ratio
+				tx := cx - 1080.0/2.0
+				targetX = math.Max(0, math.Min(float64(width-1080), tx))
+			} else if seg.Entries[0].Center != nil && centerIdx == 0 {
+				// Fallback to old Center field
+				cx := float64(seg.Entries[0].Center.X) * ratio
+				tx := cx - 1080.0/2.0
+				targetX = math.Max(0, math.Min(float64(width-1080), tx))
+			}
+			return fmt.Sprintf("%.2f", targetX)
 		}
 
+		for j, entry := range seg.Entries {
+			tStart := entry.Timestamp
+			tEnd := seg.End
+			if j < len(seg.Entries)-1 {
+				tEnd = seg.Entries[j+1].Timestamp
+			}
+			effectiveEnd := tEnd
+			if j < len(seg.Entries)-1 {
+				effectiveEnd -= 0.001
+			}
+
+			targetX := defaultX
+			if len(entry.Centers) > centerIdx {
+				cx := float64(entry.Centers[centerIdx].X) * ratio
+				tx := cx - 1080.0/2.0
+				targetX = math.Max(0, math.Min(float64(width-1080), tx))
+			} else if entry.Center != nil && centerIdx == 0 {
+				cx := float64(entry.Center.X) * ratio
+				tx := cx - 1080.0/2.0
+				targetX = math.Max(0, math.Min(float64(width-1080), tx))
+			}
+			parts = append(parts, fmt.Sprintf("between(t,%.3f,%.3f)*%.2f", tStart, effectiveEnd, targetX))
+		}
+		
+		if len(parts) == 0 {
+			return fmt.Sprintf("%.2f", defaultX)
+		}
+		return strings.Join(parts, "+")
+	}
+
+	for i, seg := range segments {
 		inputLabel := fmt.Sprintf("[v%d]", i)
 		outputLabel := fmt.Sprintf("[c%d]", i)
 
-		if entry.Mode == "center" {
-			// Center crop: 1080x1920 from center
+		if seg.Mode == "split" {
+			// SPLIT MODE: Two Dynamic Crops stacked
+			leftLabel := fmt.Sprintf("[left%d]", i)
+			rightLabel := fmt.Sprintf("[right%d]", i)
+
+			// Split input for this segment
+			filters = append(filters, fmt.Sprintf("%ssplit=2%s%s", inputLabel, leftLabel, rightLabel))
+
+			// Left/Top Panel (Index 0)
+			xExpr0 := generateXExpr(seg, scaledW, 0)
+			// Crop 1080x960 centered vertically (y=480)
+			filterLeft := fmt.Sprintf("%s"+
+				"scale=-1:1920,"+
+				"crop=w=1080:h=960:x='%s':y=480,"+
+				"trim=start=%.3f:end=%.3f,"+
+				"setpts=PTS-STARTPTS"+
+				"[left_scaled%d]",
+				leftLabel, xExpr0, seg.Start, seg.End, i)
+			filters = append(filters, filterLeft)
+
+			// Right/Bottom Panel (Index 1)
+			xExpr1 := generateXExpr(seg, scaledW, 1)
+			filterRight := fmt.Sprintf("%s"+
+				"scale=-1:1920,"+
+				"crop=w=1080:h=960:x='%s':y=480,"+
+				"trim=start=%.3f:end=%.3f,"+
+				"setpts=PTS-STARTPTS"+
+				"[right_scaled%d]",
+				rightLabel, xExpr1, seg.Start, seg.End, i)
+			filters = append(filters, filterRight)
+
+			// Stack
+			filters = append(filters, fmt.Sprintf("[left_scaled%d][right_scaled%d]vstack=inputs=2,setsar=1%s",
+				i, i, outputLabel))
+
+		} else {
+			// CENTER MODE (Default)
+			xExpr := generateXExpr(seg, scaledW, 0)
+			
 			filter := fmt.Sprintf("%s"+
 				"scale=-1:1920,"+
-				"crop=1080:1920:(in_w-1080)/2:0,"+
+				"crop=w=1080:h=1920:x='%s':y=0,"+
 				"trim=start=%.3f:end=%.3f,"+
 				"setpts=PTS-STARTPTS,"+
 				"setsar=1"+
 				"%s",
-				inputLabel, startTime, endTime, outputLabel)
-			filters = append(filters, filter)
-		} else {
-			// Split mode: split into left/right, scale, and stack horizontally
-			leftLabel := fmt.Sprintf("[left%d]", i)
-			rightLabel := fmt.Sprintf("[right%d]", i)
-
-			// Split the segment into two streams
-			filter := fmt.Sprintf("%ssplit=2%s%s", inputLabel, leftLabel, rightLabel)
-			filters = append(filters, filter)
-
-			// Crop left half, scale to 540x1920
-			filter = fmt.Sprintf("%s"+
-				"scale=-1:1920,"+
-				"crop=iw/2:1920:0:0,"+
-				"scale=540:1920,"+
-				"trim=start=%.3f:end=%.3f,"+
-				"setpts=PTS-STARTPTS"+
-				"[left_scaled%d]",
-				leftLabel, startTime, endTime, i)
-			filters = append(filters, filter)
-
-			// Crop right half, scale to 540x1920
-			filter = fmt.Sprintf("%s"+
-				"scale=-1:1920,"+
-				"crop=iw/2:1920:iw/2:0,"+
-				"scale=540:1920,"+
-				"trim=start=%.3f:end=%.3f,"+
-				"setpts=PTS-STARTPTS"+
-				"[right_scaled%d]",
-				rightLabel, startTime, endTime, i)
-			filters = append(filters, filter)
-
-			// Stack horizontally and normalize SAR
-			filter = fmt.Sprintf("[left_scaled%d][right_scaled%d]hstack=inputs=2,setsar=1%s",
-				i, i, outputLabel)
+				inputLabel, xExpr, seg.Start, seg.End, outputLabel)
 			filters = append(filters, filter)
 		}
 
 		outputs = append(outputs, outputLabel)
 	}
 
-	// Concatenate all segments
 	if len(outputs) > 1 {
-		concatFilter := fmt.Sprintf("%sconcat=n=%d:v=1:a=0[out]",
-			strings.Join(outputs, ""), len(outputs))
-		filters = append(filters, concatFilter)
+		filters = append(filters, fmt.Sprintf("%sconcat=n=%d:v=1:a=0[out]",
+			strings.Join(outputs, ""), len(outputs)))
 	} else {
-		// If only one segment, use null filter to pass through
 		filters = append(filters, fmt.Sprintf("%snull[out]", outputs[0]))
 	}
 

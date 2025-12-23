@@ -12,7 +12,7 @@ func StartWorker() {
 
 			log.Println("Processing job:", job.URL)
 
-			video, _ := yt.DownloadVideo(job.URL)
+			video, _ := yt.DownloadVideo(job.URL, "tmp/downloads")
 
 			clip := "tmp/clips/output.mp4"
 			ffmpeg.Cut(video, clip, job.Start, job.End)

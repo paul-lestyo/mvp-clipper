@@ -10,13 +10,14 @@ import (
 func main() {
 	cfg := config.Load()
 
-	// Initialize Pigo face detection model (pure Go, no CGO required)
-	err := face.InitPigo("models/facefinder")
+	// Initialize YuNet client (connects to Python service via Unix socket)
+	socketPath := "/tmp/yunet.sock"
+	err := face.InitYuNet(socketPath)
 	if err != nil {
-		log.Printf("Warning: Failed to initialize Pigo (smart crop disabled): %v", err)
+		log.Printf("Warning: Failed to initialize YuNet (smart crop disabled): %v", err)
 	} else {
 		defer face.Cleanup()
-		log.Println("Pigo face detection initialized")
+		log.Println("YuNet client initialized successfully")
 	}
 
 	server := api.NewServer(cfg)
